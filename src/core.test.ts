@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import assert from "node:assert/strict"
-import { test } from "vitest"
+import { test } from "vite-plus/test"
 import {
   createDiagnostics,
   createDefinition,
