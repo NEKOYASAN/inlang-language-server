@@ -1,0 +1,49 @@
+{
+  "name": "inlang-language-server",
+  "version": "0.0.1",
+  "description": "Unofficial Inlang language server built for the Zed extension.",
+  "keywords": [
+    "inlang",
+    "language-server",
+    "lsp",
+    "paraglide",
+    "zed"
+  ],
+  "homepage": "http://github.com/nekoyasan/inlang-language-server/tree/main#readme",
+  "bugs": {
+    "url": "https://github.com/nekoyasan/inlang-language-server/issues"
+  },
+  "license": "MIT",
+  "author": "Akane Kamiseto <akane@nekoyasan.me>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nekoyasan/inlang-language-server"
+  },
+  "bin": {
+    "inlang-language-server": "bin/server.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "type": "module",
+  "main": "bin/server.mjs",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "pack": "vp pack src/server.ts --out-dir bin --format esm --platform node --target node20 --clean",
+    "test": "vp test run",
+    "check": "vp check",
+    "fmt": "vp fmt",
+    "lint": "vp lint",
+    "prepare": "vp config"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "tsdown": "^0.22.3",
+    "typescript": "7.0.1-rc",
+    "vite-plus": "^0.2.1",
+    "vitest": "^4.1.9"
+  },
+  "packageManager": "pnpm@11.7.0"
+}
