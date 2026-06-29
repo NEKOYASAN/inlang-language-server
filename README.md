@@ -24,6 +24,29 @@ inlang-language-server
 The server communicates over stdio and is intended to be launched by the Zed extension or another
 editor integration.
 
+## Settings
+
+When used through the Zed extension, settings can be passed through `lsp.inlang.initialization_options`:
+
+```json
+{
+  "lsp": {
+    "inlang": {
+      "initialization_options": {
+        "previewLocale": "de",
+        "maxHintLength": 80,
+        "existingMessageValueDiagnostics": false
+      }
+    }
+  }
+}
+```
+
+- `previewLocale`: locale used for previews and inlay hints.
+- `maxHintLength`: maximum inlay hint text length.
+- `existingMessageValueDiagnostics`: set to `false` to hide Info diagnostics for literal text that
+  already matches an existing base-locale message value.
+
 ## Development
 
 Require Vite Plus.

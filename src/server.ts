@@ -7,6 +7,7 @@ import {
   createHover,
   createInlayHints,
   createMessageFileDiagnostics,
+  createReplaceWithExistingMessageCodeActions,
   createReferenceCodeLenses,
   createReferences,
   installSyncFileReader,
@@ -176,7 +177,7 @@ async function initialize(message) {
         resolveProvider: false,
       },
       codeActionProvider: {
-        codeActionKinds: ["refactor.extract"],
+        codeActionKinds: ["refactor.extract", "refactor.rewrite"],
         resolveProvider: false,
       },
       codeLensProvider: {
@@ -238,14 +239,22 @@ async function codeAction(params) {
   const context = await documentContext(params.textDocument.uri)
   if (!context) return []
 
-  const action = createExtractCodeAction({
+  const actions = createReplaceWithExistingMessageCodeActions({
     documentUri: params.textDocument.uri,
     text: context.text,
     range: params.range,
     project: context.project,
   })
 
-  return action ? [action] : []
+  const action = createExtractCodeAction({
+    documentUri: params.textDocument.uri,
+    text: context.text,
+    range: params.range,
+    project: context.project,
+  })
+  if (action) actions.push(action)
+
+  return actions
 }
 
 async function codeLens(params) {
@@ -282,7 +291,9 @@ async function publishDiagnostics(uri) {
 
   send("textDocument/publishDiagnostics", {
     uri,
-    diagnostics: context ? createDiagnostics(context.text, context.project) : [],
+    diagnostics: context
+      ? createDiagnostics(context.text, context.project, workspace?.settings)
+      : [],
   })
 }
 
@@ -304,7 +315,7 @@ async function documentDiagnostic(params) {
 
   return {
     kind: "full",
-    items: context ? createDiagnostics(context.text, context.project) : [],
+    items: context ? createDiagnostics(context.text, context.project, workspace?.settings) : [],
   }
 }
 

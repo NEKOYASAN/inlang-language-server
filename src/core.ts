@@ -513,7 +513,11 @@ export async function createReferences({ documentUri, text, position, project })
   return findProjectReferenceLocations(project, messageId)
 }
 
-export function createDiagnostics(text, project) {
+export function createDiagnostics(
+  text,
+  project,
+  settings: { existingMessageValueDiagnostics?: boolean } = {},
+) {
   const diagnostics = []
 
   for (const reference of findMessageReferences(text)) {
@@ -550,6 +554,38 @@ export function createDiagnostics(text, project) {
           message: `Message '${messageId}' has an empty translation for locale '${locale}'.`,
         })
       }
+    }
+  }
+
+  if (settings.existingMessageValueDiagnostics !== false) {
+    diagnostics.push(...createExistingMessageValueDiagnostics(text, project))
+  }
+
+  return diagnostics
+}
+
+function createExistingMessageValueDiagnostics(text, project) {
+  const baseMessages = project.messagesByLocale.get(project.baseLocale)
+  if (!baseMessages) return []
+
+  const diagnostics = []
+  for (const message of uniqueMessagesByLength(
+    [...baseMessages.values()].filter((value) => typeof value === "string" && value !== ""),
+  )) {
+    let index = text.indexOf(message)
+    while (index !== -1) {
+      const messageIds = [...baseMessages.entries()]
+        .filter(([, value]) => value === message)
+        .map(([messageId]) => messageId)
+      diagnostics.push({
+        range: rangeForOffsets(text, index, index + message.length),
+        severity: 3,
+        source: "Inlang",
+        code: "existing-message-value",
+        message: `Text matches existing Inlang message ${messageIds.map((messageId) => `'${messageId}'`).join(", ")}.`,
+      })
+
+      index = text.indexOf(message, index + 1)
     }
   }
 
@@ -774,6 +810,92 @@ export function createExtractCodeAction({ documentUri, text, range, project }) {
         ],
       },
     },
+  }
+}
+
+export function createReplaceWithExistingMessageCodeActions({ documentUri, text, range, project }) {
+  const baseMessages = project.messagesByLocale.get(project.baseLocale)
+  if (!baseMessages) return []
+
+  const target = replacementTargetForRange(
+    text,
+    range,
+    [...baseMessages.values()].filter((message) => typeof message === "string"),
+  )
+  if (!target) return []
+
+  return [...baseMessages.entries()]
+    .filter(([, message]) => message === target.text)
+    .map(([messageId]) => ({
+      title: `Inlang: Replace with '${messageId}'`,
+      kind: "refactor.rewrite",
+      edit: {
+        changes: {
+          [documentUri]: [
+            {
+              range: target.range,
+              newText: messageReferenceReplacement({
+                documentUri,
+                text,
+                range: target.range,
+                messageId,
+                selectedTextWasQuoted: target.wasQuoted,
+              }),
+            },
+          ],
+        },
+      },
+    }))
+}
+
+function replacementTargetForRange(text, range, messages: string[]) {
+  const selectionText = getTextInRange(text, range)
+  const selection = normalizeSelection(selectionText)
+  if (selection.text) {
+    if (selection.wasQuoted) return { text: selection.text, range, wasQuoted: true }
+
+    const rangeStartOffset = positionToOffset(text, range.start)
+    const leadingWhitespaceLength = selectionText.match(/^\s*/)[0].length
+    const startOffset = rangeStartOffset + leadingWhitespaceLength
+    return targetForMessageOccurrence(text, startOffset, startOffset + selection.text.length)
+  }
+
+  const offset = positionToOffset(text, range.start)
+  for (const message of uniqueMessagesByLength(messages)) {
+    if (!message) continue
+
+    let index = text.indexOf(message)
+    while (index !== -1) {
+      const endOffset = index + message.length
+      if (index <= offset && offset <= endOffset) {
+        return targetForMessageOccurrence(text, index, endOffset)
+      }
+
+      index = text.indexOf(message, index + 1)
+    }
+  }
+
+  return undefined
+}
+
+function uniqueMessagesByLength(messages: string[]) {
+  return [...new Set(messages)].toSorted((a, b) => b.length - a.length)
+}
+
+function targetForMessageOccurrence(text, startOffset, endOffset) {
+  const quote = text[startOffset - 1]
+  if ((quote === "'" || quote === '"' || quote === "`") && text[endOffset] === quote) {
+    return {
+      text: text.slice(startOffset, endOffset),
+      range: rangeForOffsets(text, startOffset - 1, endOffset + 1),
+      wasQuoted: true,
+    }
+  }
+
+  return {
+    text: text.slice(startOffset, endOffset),
+    range: rangeForOffsets(text, startOffset, endOffset),
+    wasQuoted: false,
   }
 }
 

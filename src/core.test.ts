@@ -11,6 +11,7 @@ import {
   createHover,
   createInlayHints,
   createMessageFileDiagnostics,
+  createReplaceWithExistingMessageCodeActions,
   createReferenceCodeLenses,
   createReferences,
   findJsonKeyRange,
@@ -19,6 +20,7 @@ import {
   humanMessageId,
   installSyncFileReader,
   loadWorkspace,
+  offsetToPosition,
   pathToUri,
   selectProjectForFile,
   upsertFlatJsonMessage,
@@ -107,6 +109,81 @@ test("loads an Inlang project and returns hints, hover, and diagnostics", async 
     diagnostics.map((diagnostic) => diagnostic.code),
     ["missing-translation", "empty-translation", "missing-message"],
   )
+})
+
+test("reports info diagnostics for text that matches an existing message value", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-existing-value-diagnostic-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(
+    messagesPath,
+    JSON.stringify({
+      welcome: "Welcome to the SvelteKit Paraglide JS example.",
+    }),
+  )
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+const a = "Welcome to the SvelteKit Paraglide JS example."
+</script>
+
+<p>Welcome to the SvelteKit Paraglide JS example.</p>
+`
+  const diagnostics = createDiagnostics(text, workspace.projects[0])
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => ({
+      code: diagnostic.code,
+      severity: diagnostic.severity,
+      message: diagnostic.message,
+    })),
+    [
+      {
+        code: "existing-message-value",
+        severity: 3,
+        message: "Text matches existing Inlang message 'welcome'.",
+      },
+      {
+        code: "existing-message-value",
+        severity: 3,
+        message: "Text matches existing Inlang message 'welcome'.",
+      },
+    ],
+  )
+})
+
+test("can disable diagnostics for text that matches an existing message value", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-existing-value-diagnostic-disabled-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ welcome: "Welcome" }))
+
+  const workspace = await loadWorkspace(root)
+  const diagnostics = createDiagnostics("Welcome", workspace.projects[0], {
+    existingMessageValueDiagnostics: false,
+  })
+
+  assert.deepEqual(diagnostics, [])
 })
 
 test("rejects configured message paths outside the project root", async () => {
@@ -428,6 +505,132 @@ test("extract action uses Paraglide references in Svelte markup", async () => {
     action.edit.changes["file:///src/routes/+page.svelte"][0].newText,
     "{m.hello_world()}",
   )
+})
+
+test("replace action uses an existing key when the selected value matches exactly", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-existing-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ hero_title: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>\nimport { m } from '$lib/paraglide/messages'\n</script>\n<h1>Hello world</h1>`
+  const start = text.indexOf("Hello world")
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/routes/+page.svelte",
+    text,
+    range: {
+      start: { line: 3, character: start - text.lastIndexOf("\n", start) - 1 },
+      end: { line: 3, character: start - text.lastIndexOf("\n", start) - 1 + "Hello world".length },
+    },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(actions[0].title, "Inlang: Replace with 'hero_title'")
+  assert.equal(
+    actions[0].edit.changes["file:///src/routes/+page.svelte"][0].newText,
+    "{m.hero_title()}",
+  )
+})
+
+test("replace action resolves an existing key at the cursor in Svelte markup", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-existing-cursor-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(
+    messagesPath,
+    JSON.stringify({
+      welcome: "Welcome to the SvelteKit Paraglide JS example.",
+    }),
+  )
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { m } from '$lib/paraglide/messages';
+
+const a = "Welcome to the SvelteKit Paraglide JS example."
+</script>
+
+<p>Welcome to the SvelteKit Paraglide JS example.</p>
+`
+  const start = text.lastIndexOf("Welcome to the SvelteKit Paraglide JS example.")
+  const position = offsetToPosition(text, start + 10)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/routes/+page.svelte",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(actions[0].title, "Inlang: Replace with 'welcome'")
+  assert.equal(
+    actions[0].edit.changes["file:///src/routes/+page.svelte"][0].newText,
+    "{m.welcome()}",
+  )
+})
+
+test("replace action replaces a quoted string at the cursor with an expression reference", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-existing-string-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(
+    messagesPath,
+    JSON.stringify({
+      welcome: "Welcome to the SvelteKit Paraglide JS example.",
+    }),
+  )
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { m } from '$lib/paraglide/messages';
+
+const a = "Welcome to the SvelteKit Paraglide JS example."
+</script>
+`
+  const start = text.indexOf("Welcome to the SvelteKit Paraglide JS example.")
+  const position = offsetToPosition(text, start + 10)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/routes/+page.svelte",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(actions[0].edit.changes["file:///src/routes/+page.svelte"][0].newText, "m.welcome()")
+  assert.deepEqual(actions[0].edit.changes["file:///src/routes/+page.svelte"][0].range, {
+    start: { line: 3, character: 10 },
+    end: { line: 3, character: 58 },
+  })
 })
 
 test("extract action uses expression Paraglide references inside quoted script strings", async () => {
