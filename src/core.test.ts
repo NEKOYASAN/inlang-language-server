@@ -23,6 +23,7 @@ import {
   offsetToPosition,
   pathToUri,
   selectProjectForFile,
+  translationFor,
   upsertFlatJsonMessage,
 } from "./core.js"
 
@@ -34,13 +35,33 @@ test("finds common Inlang message reference forms", () => {
     i18next.t('welcome_user')
     m.missing_in_german()
     m["dotted.key"]()
+    m.example_message({ username: 'John Doe' })
     formatMessage({ id: "format_id" })
   `)
 
   assert.deepEqual(
     references.map((reference) => reference.rawKey),
-    ["hello_world", "welcome_user", "missing_in_german", "dotted.key", "format_id"],
+    [
+      "hello_world",
+      "welcome_user",
+      "missing_in_german",
+      "dotted.key",
+      "example_message",
+      "format_id",
+    ],
   )
+  assert.deepEqual(references[4].args, { username: "John Doe" })
+
+  const multilineReferences = findMessageReferences(`{m.jojo_mountain_day({
+    username: "John Doe",
+    platform: "ios",
+    userGender: "male",
+  })}`)
+  assert.deepEqual(multilineReferences[0].args, {
+    username: "John Doe",
+    platform: "ios",
+    userGender: "male",
+  })
 })
 
 test("flattens simple and nested message JSON", () => {
@@ -55,6 +76,28 @@ test("flattens simple and nested message JSON", () => {
   assert.equal(messages.get("hello"), "Hello")
   assert.equal(messages.get("nested.key"), "Nested")
   assert.equal(messages.get("pattern"), "Pattern")
+})
+
+test("stringifies Inlang message-format match messages", () => {
+  const messages = flattenMessages({
+    jojo_mountain_day: [
+      {
+        declarations: ["input username", "input platform", "input userGender"],
+        selectors: ["platform", "userGender"],
+        match: {
+          "platform=android, userGender=male":
+            "{username} has to download the app on his phone from the Google Play Store.",
+          "platform=ios, userGender=male":
+            "{username} has to download the app on his iPhone from the App Store.",
+        },
+      },
+    ],
+  })
+
+  assert.equal(
+    messages.get("jojo_mountain_day"),
+    "{username} has to download the app on his phone from the Google Play Store.",
+  )
 })
 
 test("does not throw while flattening deeply nested message JSON", () => {
@@ -253,6 +296,79 @@ test("places Svelte Paraglide hints after the full call expression", async () =>
 
   assert.equal(hints[0].label.trim(), "こんにちは")
   assert.deepEqual(hints[0].position, { line: 0, character: 20 })
+})
+
+test("uses Paraglide call arguments in inlay hints", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-arguments-"))
+  const project = path.join(root, "project.inlang")
+  await mkdir(path.join(root, "messages"), { recursive: true })
+  await mkdir(project)
+  await writeFile(
+    path.join(project, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.messageFormat": { pathPattern: "./messages/{locale}.json" },
+    }),
+  )
+  await writeFile(
+    path.join(root, "messages", "en.json"),
+    JSON.stringify({
+      example_message: "Hello world {username}",
+      jojo_mountain_day: [
+        {
+          declarations: ["input username", "input platform", "input userGender"],
+          selectors: ["platform", "userGender"],
+          match: {
+            "platform=android, userGender=male":
+              "{username} has to download the app on his phone from the Google Play Store.",
+            "platform=android, userGender=female":
+              "{username} has to download the app on her phone from the Google Play Store.",
+            "platform=ios, userGender=female":
+              "{username} has to download the app on her iPhone from the App Store.",
+            "platform=ios, userGender=male":
+              "{username} has to download the app on his iPhone from the App Store.",
+            "platform=*, userGender=*": "The person has to download the app.",
+          },
+        },
+      ],
+    }),
+  )
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { m } from '$lib/paraglide/messages';
+
+const message = m.example_message({ username: 'John Doe' })
+</script>
+
+{m.jojo_mountain_day({
+  username: "John Doe",
+  platform: "ios",
+  userGender: "male",
+})}
+`
+  const jojoReference = findMessageReferences(text)[1]
+  assert.deepEqual(jojoReference.args, {
+    username: "John Doe",
+    platform: "ios",
+    userGender: "male",
+  })
+  assert.equal(
+    translationFor(
+      workspace.projects[0],
+      jojoReference.rawKey,
+      workspace.projects[0].previewLocale,
+      jojoReference.args,
+    ).message,
+    "John Doe has to download the app on his iPhone from the App Store.",
+  )
+  const hints = createInlayHints(text, workspace.projects[0])
+
+  assert.deepEqual(
+    hints.map((hint) => hint.label.trim()),
+    ["Hello world John Doe", "John Doe has to download the app on his iPhone from the App Store."],
+  )
 })
 
 test("resolves definitions from Svelte message calls to every locale JSON key", async () => {

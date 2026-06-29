@@ -197,12 +197,14 @@ export async function loadProject(
       locales,
       pathPattern,
       messagesByLocale: new Map(),
+      messageValuesByLocale: new Map(),
       messageFilesByLocale: new Map(),
       errors: ["Missing baseLocale, locales, or plugin.inlang.json.pathPattern."],
     }
   }
 
   const messagesByLocale = new Map()
+  const messageValuesByLocale = new Map()
   const messageFilesByLocale = new Map()
   const errors = []
   const projectRoot = path.dirname(projectPath)
@@ -217,6 +219,7 @@ export async function loadProject(
         `Ignoring message path for locale '${locale}' outside project root: ${messageFile}.`,
       )
       messagesByLocale.set(locale, new Map())
+      messageValuesByLocale.set(locale, new Map())
       continue
     }
     messageFilesByLocale.set(locale, messageFile)
@@ -225,9 +228,11 @@ export async function loadProject(
     if (!messages) {
       errors.push(`Could not read messages for locale '${locale}' at ${messageFile}.`)
       messagesByLocale.set(locale, new Map())
+      messageValuesByLocale.set(locale, new Map())
       continue
     }
-    messagesByLocale.set(locale, flattenMessages(messages))
+    messagesByLocale.set(locale, flattenMessageValues(messages, stringifyMessageValue))
+    messageValuesByLocale.set(locale, flattenRawMessageValues(messages))
   }
 
   return {
@@ -240,6 +245,7 @@ export async function loadProject(
     locales,
     pathPattern,
     messagesByLocale,
+    messageValuesByLocale,
     messageFilesByLocale,
     errors,
   }
@@ -264,6 +270,10 @@ async function readJson(filePath) {
 }
 
 export function flattenMessages(json) {
+  return flattenMessageValues(json, stringifyMessageValue)
+}
+
+function flattenRawMessageValues(json) {
   const messages = new Map()
   const stack = [{ value: json, keyPath: "", isRoot: true }]
 
@@ -275,7 +285,32 @@ export function flattenMessages(json) {
       continue
     }
 
-    const text = stringifyMessageValue(value)
+    if (stringifyMessageValue(value) !== undefined) {
+      messages.set(keyPath, value)
+      continue
+    }
+
+    if (isPlainObject(value)) {
+      pushNestedMessages(stack, value, keyPath, false)
+    }
+  }
+
+  return messages
+}
+
+function flattenMessageValues(json, stringify) {
+  const messages = new Map()
+  const stack = [{ value: json, keyPath: "", isRoot: true }]
+
+  while (stack.length > 0) {
+    const { value, keyPath, isRoot } = stack.pop()
+
+    if (isRoot && isPlainObject(value)) {
+      pushNestedMessages(stack, value, "", true)
+      continue
+    }
+
+    const text = stringify(value)
     if (typeof text === "string") {
       messages.set(keyPath, text)
       continue
@@ -303,34 +338,115 @@ function pushNestedMessages(stack, value, keyPath, isRoot) {
 }
 
 export function stringifyMessageValue(value) {
-  if (typeof value === "string") return value
-  if (Array.isArray(value)) return stringifyPattern(value)
+  return stringifyMessageValueWithArgs(value)
+}
+
+function stringifyMessageValueWithArgs(value, args = {}) {
+  if (typeof value === "string") return interpolatePlaceholders(value, args)
+  if (Array.isArray(value)) {
+    return stringifyMessageFormatArray(value, args) ?? stringifyPattern(value, args)
+  }
   if (!isPlainObject(value)) return undefined
 
-  if (typeof value.message === "string") return value.message
-  if (typeof value.value === "string") return value.value
-  if (Array.isArray(value.pattern)) return stringifyPattern(value.pattern)
+  if (typeof value.message === "string") return interpolatePlaceholders(value.message, args)
+  if (typeof value.value === "string") return interpolatePlaceholders(value.value, args)
+  if (Array.isArray(value.pattern)) return stringifyPattern(value.pattern, args)
   if (Array.isArray(value.variants)) {
     const variant = value.variants.find((candidate) => Array.isArray(candidate?.pattern))
-    if (variant) return stringifyPattern(variant.pattern)
+    if (variant) return stringifyPattern(variant.pattern, args)
   }
 
   return undefined
 }
 
-function stringifyPattern(pattern) {
+function stringifyPattern(pattern, args = {}) {
   return pattern
     .map((element) => {
-      if (typeof element === "string") return element
+      if (typeof element === "string") return interpolatePlaceholders(element, args)
       if (element?.type === "text") return element.value ?? ""
       if (element?.type === "expression") {
         const arg = element.arg
-        if (arg?.type === "variable-reference") return `{${arg.name}}`
+        if (arg?.type === "variable-reference") return formatPlaceholder(arg.name, args)
         if (arg?.type === "literal") return String(arg.value ?? "")
       }
       return ""
     })
     .join("")
+}
+
+function stringifyMessageFormatArray(value, args) {
+  for (const element of value) {
+    if (!isPlainObject(element)) continue
+    if (isPlainObject(element.match)) {
+      return stringifyMessageFormatMatch(element.match, element.selectors, args)
+    }
+    if (Array.isArray(element.pattern)) return stringifyPattern(element.pattern, args)
+  }
+
+  return undefined
+}
+
+function stringifyMessageFormatMatch(match, selectors, args) {
+  const entries = Object.entries(match)
+  if (entries.length === 0) return undefined
+
+  const selectorNames = Array.isArray(selectors)
+    ? selectors.filter((selector) => typeof selector === "string")
+    : []
+  const selected = selectMessageFormatVariant(entries, selectorNames, args) ?? entries[0]?.[1]
+  return stringifyMessageFormatValue(selected, args)
+}
+
+function selectMessageFormatVariant(entries, selectors, args) {
+  let best
+
+  for (const [conditionText, value] of entries) {
+    const conditions = parseMessageFormatConditions(conditionText)
+    let score = 0
+    let matches = true
+
+    for (const selector of selectors) {
+      const expected = conditions.get(selector)
+      const actual = args[selector]
+      if (expected === undefined) continue
+      if (expected === "*") continue
+      if (actual === undefined || String(actual) !== expected) {
+        matches = false
+        break
+      }
+      score += 1
+    }
+
+    if (matches && (!best || score > best.score)) {
+      best = { score, value }
+    }
+  }
+
+  return best?.value
+}
+
+function parseMessageFormatConditions(text) {
+  const conditions = new Map()
+  for (const part of String(text).split(",")) {
+    const [name, value] = part.split("=")
+    if (name && value) conditions.set(name.trim(), value.trim())
+  }
+  return conditions
+}
+
+function stringifyMessageFormatValue(value, args) {
+  if (typeof value === "string") return interpolatePlaceholders(value, args)
+  if (Array.isArray(value)) return stringifyPattern(value, args)
+  if (isPlainObject(value)) return stringifyMessageValueWithArgs(value, args)
+  return undefined
+}
+
+function interpolatePlaceholders(text, args) {
+  return text.replace(/\{([A-Za-z_$][\w$]*)\}/g, (_, name) => formatPlaceholder(name, args))
+}
+
+function formatPlaceholder(name, args) {
+  return Object.hasOwn(args, name) ? String(args[name]) : `{${name}}`
 }
 
 function isPlainObject(value) {
@@ -361,13 +477,13 @@ export function findMessageReferences(text) {
       kind: "formatMessage",
     },
     {
-      regex: /\b(?:m|messages)\s*\[\s*(["'`])([^"'`]+)\1\s*\]\s*(?:\(\s*\))?/g,
+      regex: /\b(?:m|messages)\s*\[\s*(["'`])([^"'`]+)\1\s*\]\s*(?:\()?/g,
       keyGroup: 2,
       keyOffset: (match) => match[0].lastIndexOf(match[2]),
       kind: "paraglide-bracket",
     },
     {
-      regex: /\b(?:m|messages)\.([A-Za-z_$][\w$]*)\s*\(\s*\)/g,
+      regex: /\b(?:m|messages)\.([A-Za-z_$][\w$]*)\s*\(/g,
       keyGroup: 1,
       keyOffset: (match) => match[0].indexOf(match[1]),
       kind: "paraglide-dot",
@@ -386,13 +502,69 @@ export function findMessageReferences(text) {
       references.push({
         rawKey,
         range: rangeForOffsets(text, startOffset, endOffset),
-        fullRange: rangeForOffsets(text, match.index, match.index + match[0].length),
+        fullRange: rangeForOffsets(text, match.index, messageReferenceEndOffset(text, match)),
+        args: messageReferenceArguments(text, match),
         kind: pattern.kind,
       })
     }
   }
 
   return references.toSorted((a, b) => comparePositions(a.range.start, b.range.start))
+}
+
+function messageReferenceEndOffset(text, match) {
+  const openParenOffset = callOpenParenOffset(match)
+  if (openParenOffset === undefined) return match.index + match[0].length
+
+  const closeParenOffset = matchingDelimiterOffset(text, openParenOffset, "(", ")")
+  return closeParenOffset === undefined ? match.index + match[0].length : closeParenOffset + 1
+}
+
+function messageReferenceArguments(text, match) {
+  const openParenOffset = callOpenParenOffset(match)
+  if (openParenOffset === undefined) return {}
+
+  const closeParenOffset = matchingDelimiterOffset(text, openParenOffset, "(", ")")
+  if (closeParenOffset === undefined) return {}
+
+  const argumentText = text.slice(openParenOffset + 1, closeParenOffset).trim()
+  if (!argumentText.startsWith("{")) return {}
+
+  const objectEndOffset = matchingDelimiterOffset(argumentText, 0, "{", "}")
+  if (objectEndOffset === undefined) return {}
+
+  return parseObjectLiteralArguments(argumentText.slice(0, objectEndOffset + 1))
+}
+
+function callOpenParenOffset(match) {
+  const relativeOffset = match[0].lastIndexOf("(")
+  return relativeOffset === -1 ? undefined : match.index + relativeOffset
+}
+
+function parseObjectLiteralArguments(text) {
+  const args = {}
+  const stringPropertyPattern =
+    /(?:^|[,{])\s*(?:([A-Za-z_$][\w$]*)|(["'`])([^"'`]+)\2)\s*:\s*(["'`])((?:\\.|(?!\4)[^\\])*)\4/g
+  const primitivePropertyPattern =
+    /(?:^|[,{])\s*(?:([A-Za-z_$][\w$]*)|(["'`])([^"'`]+)\2)\s*:\s*(-?\d+(?:\.\d+)?|true|false|null)\b/g
+
+  for (const match of text.matchAll(stringPropertyPattern)) {
+    args[match[1] ?? match[3]] = unescapeJsString(match[5], match[4])
+  }
+  for (const match of text.matchAll(primitivePropertyPattern)) {
+    const key = match[1] ?? match[3]
+    if (Object.hasOwn(args, key)) continue
+    args[key] = parsePrimitiveLiteral(match[4])
+  }
+
+  return args
+}
+
+function parsePrimitiveLiteral(value) {
+  if (value === "true") return true
+  if (value === "false") return false
+  if (value === "null") return null
+  return Number(value)
 }
 
 export function resolveMessageId(project, rawKey) {
@@ -406,12 +578,18 @@ export function resolveMessageId(project, rawKey) {
   return rawKey
 }
 
-export function translationFor(project, rawKey, locale = project.previewLocale) {
+export function translationFor(project, rawKey, locale = project.previewLocale, args = {}) {
   const messageId = resolveMessageId(project, rawKey)
   const messages = project.messagesByLocale.get(locale) ?? new Map()
+  const rawMessages = project.messageValuesByLocale?.get(locale)
+  const message = rawMessages?.has(messageId)
+    ? stringifyMessageValueWithArgs(rawMessages.get(messageId), args)
+    : messages.has(messageId)
+      ? stringifyMessageValueWithArgs(messages.get(messageId), args)
+      : undefined
   return {
     messageId,
-    message: messages.get(messageId),
+    message,
     exists: messages.has(messageId),
   }
 }
@@ -429,7 +607,12 @@ export function createInlayHints(
   return findMessageReferences(text)
     .filter((reference) => !range || rangesIntersect(reference.range, range))
     .map((reference) => {
-      const { messageId, message, exists } = translationFor(project, reference.rawKey)
+      const { messageId, message, exists } = translationFor(
+        project,
+        reference.rawKey,
+        project.previewLocale,
+        reference.args,
+      )
       const label = exists
         ? message.trim() === ""
           ? `[empty: ${messageId}]`
@@ -464,7 +647,7 @@ export function createHover(text, project, position) {
   const messageId = resolveMessageId(project, reference.rawKey)
   const rows = project.locales
     .map((locale) => {
-      const message = project.messagesByLocale.get(locale)?.get(messageId)
+      const message = translationFor(project, reference.rawKey, locale, reference.args).message
       return `| ${escapeMarkdown(locale)} | ${escapeMarkdown(typeof message === "string" ? message : "[missing]")} |`
     })
     .join("\n")
@@ -996,9 +1179,14 @@ function nextNonWhitespaceOffset(text, offset) {
 }
 
 function matchingBraceOffset(text, openOffset) {
+  return matchingDelimiterOffset(text, openOffset, "{", "}")
+}
+
+function matchingDelimiterOffset(text, openOffset, openCharacter, closeCharacter) {
   let depth = 0
   let inString = false
   let escaped = false
+  let stringQuote = undefined
 
   for (let index = openOffset; index < text.length; index += 1) {
     const character = text[index]
@@ -1008,17 +1196,19 @@ function matchingBraceOffset(text, openOffset) {
         escaped = false
       } else if (character === "\\") {
         escaped = true
-      } else if (character === '"') {
+      } else if (character === stringQuote) {
         inString = false
+        stringQuote = undefined
       }
       continue
     }
 
-    if (character === '"') {
+    if (character === '"' || character === "'" || character === "`") {
       inString = true
-    } else if (character === "{") {
+      stringQuote = character
+    } else if (character === openCharacter) {
       depth += 1
-    } else if (character === "}") {
+    } else if (character === closeCharacter) {
       depth -= 1
       if (depth === 0) return index
     }
@@ -1033,6 +1223,23 @@ function unescapeJsonString(value) {
   } catch {
     return value
   }
+}
+
+function unescapeJsString(value, quote) {
+  if (quote === '"') return unescapeJsonString(value)
+
+  return value
+    .replace(/\\u\{([\dA-Fa-f]+)\}/g, (_, group) =>
+      String.fromCodePoint(Number.parseInt(group, 16)),
+    )
+    .replace(/\\u([\dA-Fa-f]{4})/g, (_, group) => String.fromCodePoint(Number.parseInt(group, 16)))
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\r")
+    .replace(/\\t/g, "\t")
+    .replace(/\\`/g, "`")
+    .replace(/\\'/g, "'")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\")
 }
 
 function wholeDocumentRange(text) {
