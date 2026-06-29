@@ -9,15 +9,15 @@
     "paraglide",
     "zed"
   ],
-  "homepage": "http://github.com/nekoyasan/inlang-language-server/tree/main#readme",
+  "homepage": "https://github.com/NEKOYASAN/inlang-language-server/tree/main#readme",
   "bugs": {
-    "url": "https://github.com/nekoyasan/inlang-language-server/issues"
+    "url": "https://github.com/NEKOYASAN/inlang-language-server/issues"
   },
   "license": "MIT",
   "author": "Akane Kamiseto <akane@nekoyasan.me>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nekoyasan/inlang-language-server"
+    "url": "https://github.com/NEKOYASAN/inlang-language-server"
   },
   "bin": {
     "inlang-language-server": "bin/server.mjs"
