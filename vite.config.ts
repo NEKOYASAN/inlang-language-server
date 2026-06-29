@@ -17,7 +17,6 @@ export default defineConfig({
     printWidth: 100,
     semi: false,
     trailingComma: "all",
-    ignorePatterns: ["bin/**", "node_modules/**"],
   },
   lint: {
     plugins: ["typescript", "unicorn", "oxc"],
@@ -38,6 +37,5 @@ export default defineConfig({
       typeAware: true,
       typeCheck: true,
     },
-    ignorePatterns: ["bin/**", "node_modules/**"],
   },
 })
