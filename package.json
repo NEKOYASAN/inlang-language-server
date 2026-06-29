@@ -32,10 +32,11 @@
   },
   "scripts": {
     "pack": "vp pack src/server.ts --out-dir bin --format esm --platform node --target node20 --clean",
-    "test": "vp test run",
+    "test": "vp test",
     "check": "vp check",
     "fmt": "vp fmt",
     "lint": "vp lint",
+    "prepublishOnly": "vp pack",
     "prepare": "vp config"
   },
   "devDependencies": {
