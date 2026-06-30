@@ -1,6 +1,6 @@
 {
   "name": "inlang-language-server",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Unofficial Inlang language server built for the Zed extension.",
   "keywords": [
     "inlang",
