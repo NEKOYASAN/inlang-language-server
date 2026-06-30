@@ -275,6 +275,72 @@ let { class: className = '' } = $props();
   )
 })
 
+test("does not report existing message diagnostics inside markup expressions", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-existing-value-expression-noise-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ dot: ".", period_message: "Period." }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { m } from '$lib/paraglide/messages.js';
+</script>
+
+<p>{a.b.c}</p>
+<p>Period.</p>
+`
+  const diagnostics = createDiagnostics(text, workspace.projects[0])
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    ["Text matches existing Inlang message 'period_message'."],
+  )
+})
+
+test("does not report existing message diagnostics inside member expressions", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-existing-value-member-expression-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(
+    messagesPath,
+    JSON.stringify({ dot: ".", test: "test", visible: "Visible label" }),
+  )
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+const test = client.test.get()
+</script>
+
+<p>Visible label</p>
+`
+  const diagnostics = createDiagnostics(text, workspace.projects[0])
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    ["Text matches existing Inlang message 'visible'."],
+  )
+})
+
 test("rejects configured message paths outside the project root", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "inlang-contained-"))
   const project = path.join(root, "project.inlang")
