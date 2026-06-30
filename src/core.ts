@@ -772,6 +772,20 @@ function createExistingMessageValueDiagnostics(text, project) {
     }
   }
 
+  for (const [messageId, message] of baseMessages.entries()) {
+    if (typeof message !== "string" || !message.includes("{")) continue
+
+    for (const target of interpolatedReplacementTargets(text, message)) {
+      diagnostics.push({
+        range: target.range,
+        severity: 3,
+        source: "Inlang",
+        code: "existing-message-value",
+        message: `Text matches existing Inlang message '${messageId}'.`,
+      })
+    }
+  }
+
   return diagnostics
 }
 
@@ -1000,35 +1014,116 @@ export function createReplaceWithExistingMessageCodeActions({ documentUri, text,
   const baseMessages = project.messagesByLocale.get(project.baseLocale)
   if (!baseMessages) return []
 
+  const actions = []
   const target = replacementTargetForRange(
     text,
     range,
     [...baseMessages.values()].filter((message) => typeof message === "string"),
   )
-  if (!target) return []
+  if (target) {
+    actions.push(
+      ...[...baseMessages.entries()]
+        .filter(([, message]) => message === target.text)
+        .map(([messageId]) =>
+          replaceWithExistingMessageAction({ documentUri, text, target, messageId }),
+        ),
+    )
+  }
 
-  return [...baseMessages.entries()]
-    .filter(([, message]) => message === target.text)
-    .map(([messageId]) => ({
-      title: `Inlang: Replace with '${messageId}'`,
-      kind: "refactor.rewrite",
-      edit: {
-        changes: {
-          [documentUri]: [
-            {
+  actions.push(
+    ...createReplaceWithInterpolatedMessageCodeActions({
+      documentUri,
+      text,
+      range,
+      baseMessages,
+    }),
+  )
+
+  return uniqueCodeActions(actions)
+}
+
+function createReplaceWithInterpolatedMessageCodeActions({
+  documentUri,
+  text,
+  range,
+  baseMessages,
+}) {
+  const actions = []
+  const offset = positionToOffset(text, range.start)
+
+  for (const [messageId, message] of baseMessages.entries()) {
+    if (typeof message !== "string" || !message.includes("{")) continue
+
+    for (const target of interpolatedReplacementTargets(text, message)) {
+      if (rangesEqual(range, target.range) || rangeContains(target.range, range.start)) {
+        actions.push(
+          replaceWithExistingMessageAction({
+            documentUri,
+            text,
+            target,
+            messageId,
+          }),
+        )
+        continue
+      }
+
+      const startOffset = positionToOffset(text, target.range.start)
+      const endOffset = positionToOffset(text, target.range.end)
+      if (startOffset <= offset && offset <= endOffset) {
+        actions.push(
+          replaceWithExistingMessageAction({
+            documentUri,
+            text,
+            target,
+            messageId,
+          }),
+        )
+      }
+    }
+  }
+
+  return actions
+}
+
+function replaceWithExistingMessageAction({ documentUri, text, target, messageId }) {
+  const importEdit = createParaglideMessagesImportEdit(text)
+  return {
+    title: `Inlang: Replace with '${messageId}'`,
+    kind: "refactor.rewrite",
+    edit: {
+      changes: {
+        [documentUri]: [
+          ...(importEdit ? [importEdit] : []),
+          {
+            range: target.range,
+            newText: messageReferenceReplacement({
+              documentUri,
+              text,
               range: target.range,
-              newText: messageReferenceReplacement({
-                documentUri,
-                text,
-                range: target.range,
-                messageId,
-                selectedTextWasQuoted: target.wasQuoted,
-              }),
-            },
-          ],
-        },
+              messageId,
+              selectedTextWasQuoted: target.wasQuoted,
+              argsText: target.argsText,
+            }),
+          },
+        ],
       },
-    }))
+    },
+  }
+}
+
+function uniqueCodeActions(actions) {
+  const seen = new Set()
+  return actions.filter((action) => {
+    const edit = action.edit.changes[Object.keys(action.edit.changes)[0]][0]
+    const id = `${action.title}:${JSON.stringify(edit.range)}:${edit.newText}`
+    if (seen.has(id)) return false
+    seen.add(id)
+    return true
+  })
+}
+
+function rangesEqual(a, b) {
+  return comparePositions(a.start, b.start) === 0 && comparePositions(a.end, b.end) === 0
 }
 
 function replacementTargetForRange(text, range, messages: string[]) {
@@ -1080,6 +1175,93 @@ function targetForMessageOccurrence(text, startOffset, endOffset) {
     range: rangeForOffsets(text, startOffset, endOffset),
     wasQuoted: false,
   }
+}
+
+function interpolatedReplacementTargets(text, message) {
+  const template = messageTemplateParts(message)
+  if (template.placeholders.length === 0) return []
+
+  const regex = messageTemplateSourceRegex(template.parts)
+  const targets = []
+
+  for (const match of text.matchAll(regex)) {
+    const args = {}
+    let captureIndex = 1
+
+    for (const placeholder of template.placeholders) {
+      const expression = match[captureIndex++]
+      const literal = match[captureIndex++]
+      if (expression !== undefined) {
+        args[placeholder] = { kind: "expression", value: expression.trim() }
+      } else if (literal !== undefined) {
+        args[placeholder] = { kind: "literal", value: literal.trim() }
+      }
+    }
+
+    if (Object.keys(args).length !== template.placeholders.length) continue
+
+    targets.push({
+      text: match[0],
+      range: rangeForOffsets(text, match.index, match.index + match[0].length),
+      wasQuoted: false,
+      argsText: formatMessageReferenceArgs(args),
+    })
+  }
+
+  return targets
+}
+
+function messageTemplateParts(message) {
+  const parts = []
+  const placeholders = []
+  let offset = 0
+
+  for (const match of message.matchAll(/\{([A-Za-z_$][\w$]*)\}/g)) {
+    if (match.index > offset) {
+      parts.push({ kind: "text", value: message.slice(offset, match.index) })
+    }
+    parts.push({ kind: "placeholder", name: match[1] })
+    placeholders.push(match[1])
+    offset = match.index + match[0].length
+  }
+
+  if (offset < message.length) {
+    parts.push({ kind: "text", value: message.slice(offset) })
+  }
+
+  return { parts, placeholders }
+}
+
+function messageTemplateSourceRegex(parts) {
+  const source = parts
+    .map((part, index) => {
+      if (part.kind === "text") return escapeRegExp(part.value)
+
+      const hasNextText = parts.slice(index + 1).some((candidate) => candidate.kind === "text")
+      const literalPattern = hasNextText ? "([\\s\\S]+?)" : "([^<\\n{}]+)"
+      return `(?:\\{\\s*([^{}]+?)\\s*\\}|${literalPattern})`
+    })
+    .join("")
+
+  return new RegExp(source, "g")
+}
+
+function formatMessageReferenceArgs(args) {
+  return `{ ${Object.entries(args)
+    .map(([name, value]) => `${name}: ${formatMessageReferenceArgValue(value)}`)
+    .join(", ")} }`
+}
+
+function formatMessageReferenceArgValue(value) {
+  return value.kind === "expression" ? value.value : quoteJsString(value.value)
+}
+
+function quoteJsString(value) {
+  return `'${String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n")}'`
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")
 }
 
 function readFileSyncSafe(filePath) {
@@ -1265,21 +1447,154 @@ function messageReferenceReplacement({
   range,
   messageId,
   selectedTextWasQuoted,
+  argsText = "",
 }) {
-  const usesParaglideMessages =
-    /\bimport\s*\{\s*m\s*\}\s*from\s*["'][^"']*paraglide\/messages["']/.test(text)
-  if (!usesParaglideMessages) return `t(${JSON.stringify(messageId)})`
+  const paraglideMessagesBinding =
+    findParaglideMessagesBinding(text) ?? importableParaglideMessagesBinding(text)
+  const reference = paraglideMessagesBinding
+    ? isValidJsIdentifier(messageId)
+      ? `${paraglideMessagesBinding}.${messageId}(${argsText})`
+      : `${paraglideMessagesBinding}[${JSON.stringify(messageId)}](${argsText})`
+    : argsText
+      ? `t(${JSON.stringify(messageId)}, ${argsText})`
+      : `t(${JSON.stringify(messageId)})`
 
-  const reference = isValidJsIdentifier(messageId)
-    ? `m.${messageId}()`
-    : `m[${JSON.stringify(messageId)}]()`
-
-  if (selectedTextWasQuoted) return reference
-  if (documentUri.endsWith(".svelte") && !isPositionInsideScriptTag(text, range.start)) {
+  if (needsMarkupExpressionWrapper(documentUri, text, range.start)) {
     return `{${reference}}`
   }
+  if (selectedTextWasQuoted) return reference
 
   return reference
+}
+
+function findParaglideMessagesBinding(text) {
+  for (const match of text.matchAll(
+    /\bimport\s+([\s\S]*?)\s+from\s*["'][^"']*paraglide\/messages["']/g,
+  )) {
+    const specifier = match[1].trim()
+    const namespaceImport = specifier.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)$/)
+    if (namespaceImport) return namespaceImport[1]
+
+    const namedImports = specifier.match(/\{([\s\S]*?)\}/)
+    if (!namedImports) continue
+
+    for (const importSpecifier of namedImports[1].split(",")) {
+      const namedImport = importSpecifier.trim().match(/^m(?:\s+as\s+([A-Za-z_$][\w$]*))?$/)
+      if (namedImport) return namedImport[1] ?? "m"
+    }
+  }
+
+  if (/\bm\s*(?:\.|\[)/.test(text)) return "m"
+  if (/\bmessages\s*(?:\.|\[)/.test(text)) return "messages"
+  return undefined
+}
+
+function importableParaglideMessagesBinding(text) {
+  return createParaglideMessagesImportEdit(text) ? "m" : undefined
+}
+
+function createParaglideMessagesImportEdit(text) {
+  if (findParaglideMessagesBinding(text)) return undefined
+
+  const importInfo = findNamedParaglideMessagesImport(text)
+  if (!importInfo) return undefined
+
+  return {
+    range: rangeForOffsets(text, importInfo.insertOffset, importInfo.insertOffset),
+    newText: importInfo.needsLeadingComma ? ", m" : "m",
+  }
+}
+
+function findNamedParaglideMessagesImport(text) {
+  for (const match of text.matchAll(
+    /\bimport\s+\{([\s\S]*?)\}\s+from\s*["'][^"']*paraglide\/messages["']/g,
+  )) {
+    const importsText = match[1]
+    const importsStartOffset = match.index + match[0].indexOf("{") + 1
+    const importsEndOffset = importsStartOffset + importsText.length
+    const trimmed = importsText.trim()
+    if (!trimmed) {
+      return {
+        insertOffset: importsStartOffset,
+        needsLeadingComma: false,
+      }
+    }
+
+    return {
+      insertOffset: importsEndOffset,
+      needsLeadingComma: !trimmed.endsWith(","),
+    }
+  }
+
+  return undefined
+}
+
+function needsMarkupExpressionWrapper(documentUri, text, position) {
+  if (isPositionInsideScriptTag(text, position)) return false
+
+  const extension = documentExtension(documentUri)
+  if ([".svelte", ".astro", ".vue"].includes(extension)) return true
+  if (![".jsx", ".tsx", ".mdx"].includes(extension)) return false
+
+  return isPositionInsideJsxMarkup(text, position)
+}
+
+function documentExtension(documentUri) {
+  const filePath = uriToPath(documentUri)
+  if (filePath) return path.extname(filePath)
+
+  const pathname = documentUri.split(/[?#]/, 1)[0]
+  return path.extname(pathname)
+}
+
+function isPositionInsideJsxMarkup(text, position) {
+  const offset = positionToOffset(text, position)
+  if (isPositionInsideJsxExpression(text, offset)) return false
+
+  return isPositionInsideJsxTag(text, offset) || isPositionInsideJsxText(text, offset)
+}
+
+function isPositionInsideJsxTag(text, offset) {
+  const before = text.slice(0, offset)
+  const lastOpen = before.lastIndexOf("<")
+  const lastClose = before.lastIndexOf(">")
+  if (lastOpen <= lastClose) return false
+
+  const tagStart = text.slice(lastOpen, offset)
+  return /^<\/?[A-Za-z][\w:.-]*/.test(tagStart)
+}
+
+function isPositionInsideJsxText(text, offset) {
+  const before = text.slice(0, offset)
+  const after = text.slice(offset)
+  const lastClose = before.lastIndexOf(">")
+  const lastOpen = before.lastIndexOf("<")
+  if (lastClose <= lastOpen) return false
+
+  const nextOpen = after.indexOf("<")
+  const nextClose = after.indexOf(">")
+  if (nextOpen === -1) return false
+  if (nextClose !== -1 && nextClose < nextOpen) return false
+
+  const previousTagStart = before.lastIndexOf("<", lastClose)
+  if (previousTagStart === -1) return false
+  return !before.slice(previousTagStart, lastClose + 1).startsWith("</")
+}
+
+function isPositionInsideJsxExpression(text, offset) {
+  const before = text.slice(0, offset)
+  const lastOpen = before.lastIndexOf("{")
+  if (lastOpen === -1) return false
+
+  const lastClose = before.lastIndexOf("}")
+  if (lastClose > lastOpen) return false
+
+  const lastTagClose = before.lastIndexOf(">")
+  const lastTagOpen = before.lastIndexOf("<")
+  return (
+    (lastTagOpen > lastTagClose && lastOpen > lastTagOpen) ||
+    (lastTagClose > lastTagOpen && lastOpen > lastTagClose)
+  )
 }
 
 function isPositionInsideScriptTag(text, position) {
