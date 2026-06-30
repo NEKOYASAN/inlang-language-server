@@ -1120,11 +1120,17 @@ function isSupportedReplacementTarget(text, target) {
   if (isRangeInsideExistingMessageReference(text, startOffset, endOffset)) return false
   if (isRangeInsideImportStatement(text, startOffset, endOffset)) return false
   if (isRangeInsideIgnoredMarkupAttribute(text, startOffset)) return false
+  if (isRangeInsideMarkupExpression(text, startOffset, endOffset)) return false
 
   if (target.wasQuoted) return true
+  if (!containsSearchableMessageText(target.text)) return false
   if (isRangeInsideScriptTag(text, startOffset, endOffset)) return false
 
   return isLikelyMarkupText(text, startOffset, endOffset)
+}
+
+function containsSearchableMessageText(text) {
+  return /[\p{Letter}\p{Number}]/u.test(text)
 }
 
 function hasMessageBoundary(text, startOffset, endOffset, wasQuoted) {
@@ -1184,6 +1190,37 @@ function isRangeInsideScriptTag(text, startOffset, endOffset) {
     isPositionInsideScriptTag(text, offsetToPosition(text, startOffset)) &&
     isPositionInsideScriptTag(text, offsetToPosition(text, endOffset))
   )
+}
+
+function isRangeInsideMarkupExpression(text, startOffset, endOffset) {
+  const openOffset = enclosingMarkupExpressionOpenOffset(text, startOffset)
+  if (openOffset === undefined) return false
+
+  const closeOffset = matchingDelimiterOffset(text, openOffset, "{", "}")
+  return closeOffset !== undefined && endOffset <= closeOffset
+}
+
+function enclosingMarkupExpressionOpenOffset(text, offset) {
+  const before = text.slice(0, offset)
+  const openOffset = before.lastIndexOf("{")
+  if (openOffset === -1) return undefined
+
+  const closeOffset = before.lastIndexOf("}")
+  if (closeOffset > openOffset) return undefined
+
+  const lastTagOpen = before.lastIndexOf("<")
+  const lastTagClose = before.lastIndexOf(">")
+  if (lastTagOpen > lastTagClose) return openOffset > lastTagOpen ? openOffset : undefined
+
+  if (lastTagClose > lastTagOpen) {
+    const nextTagOpen = text.indexOf("<", offset)
+    const nextTagClose = text.indexOf(">", offset)
+    if (nextTagOpen !== -1 && (nextTagClose === -1 || nextTagOpen < nextTagClose)) {
+      return openOffset > lastTagClose ? openOffset : undefined
+    }
+  }
+
+  return undefined
 }
 
 function isLikelyMarkupText(text, startOffset, endOffset) {
