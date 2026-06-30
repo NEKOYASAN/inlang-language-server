@@ -229,6 +229,52 @@ test("can disable diagnostics for text that matches an existing message value", 
   assert.deepEqual(diagnostics, [])
 })
 
+test("does not report existing message diagnostics for code, imports, classes, or references", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-existing-value-diagnostic-noise-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(
+    messagesPath,
+    JSON.stringify({
+      or: "or",
+      flex: "flex",
+      class: "class",
+      maperror_title: "Map error title",
+      real: "Real user text",
+    }),
+  )
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script lang="ts">
+import type { SvelteHTMLElements } from 'svelte/elements';
+import { m } from '$lib/paraglide/messages.js';
+
+let { class: className = '' } = $props();
+</script>
+
+<div class="flex flex-col">
+  <p>{m.maperror_title()}</p>
+  <p>Real user text</p>
+</div>
+`
+  const diagnostics = createDiagnostics(text, workspace.projects[0])
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    ["Text matches existing Inlang message 'real'."],
+  )
+})
+
 test("rejects configured message paths outside the project root", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "inlang-contained-"))
   const project = path.join(root, "project.inlang")

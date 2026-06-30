@@ -757,11 +757,17 @@ function createExistingMessageValueDiagnostics(text, project) {
   )) {
     let index = text.indexOf(message)
     while (index !== -1) {
+      const target = targetForMessageOccurrence(text, index, index + message.length)
+      if (!isSupportedReplacementTarget(text, target)) {
+        index = text.indexOf(message, index + 1)
+        continue
+      }
+
       const messageIds = [...baseMessages.entries()]
         .filter(([, value]) => value === message)
         .map(([messageId]) => messageId)
       diagnostics.push({
-        range: rangeForOffsets(text, index, index + message.length),
+        range: target.range,
         severity: 3,
         source: "Inlang",
         code: "existing-message-value",
@@ -776,6 +782,8 @@ function createExistingMessageValueDiagnostics(text, project) {
     if (typeof message !== "string" || !message.includes("{")) continue
 
     for (const target of interpolatedReplacementTargets(text, message)) {
+      if (!isSupportedReplacementTarget(text, target)) continue
+
       diagnostics.push({
         range: target.range,
         severity: 3,
@@ -1020,7 +1028,7 @@ export function createReplaceWithExistingMessageCodeActions({ documentUri, text,
     range,
     [...baseMessages.values()].filter((message) => typeof message === "string"),
   )
-  if (target) {
+  if (target && isSupportedReplacementTarget(text, target)) {
     actions.push(
       ...[...baseMessages.entries()]
         .filter(([, message]) => message === target.text)
@@ -1055,6 +1063,8 @@ function createReplaceWithInterpolatedMessageCodeActions({
     if (typeof message !== "string" || !message.includes("{")) continue
 
     for (const target of interpolatedReplacementTargets(text, message)) {
+      if (!isSupportedReplacementTarget(text, target)) continue
+
       if (rangesEqual(range, target.range) || rangeContains(target.range, range.start)) {
         actions.push(
           replaceWithExistingMessageAction({
@@ -1175,6 +1185,92 @@ function targetForMessageOccurrence(text, startOffset, endOffset) {
     range: rangeForOffsets(text, startOffset, endOffset),
     wasQuoted: false,
   }
+}
+
+function isSupportedReplacementTarget(text, target) {
+  const startOffset = positionToOffset(text, target.range.start)
+  const endOffset = positionToOffset(text, target.range.end)
+  if (!hasMessageBoundary(text, startOffset, endOffset, target.wasQuoted)) return false
+  if (isRangeInsideExistingMessageReference(text, startOffset, endOffset)) return false
+  if (isRangeInsideImportStatement(text, startOffset, endOffset)) return false
+  if (isRangeInsideIgnoredMarkupAttribute(text, startOffset)) return false
+
+  if (target.wasQuoted) return true
+  if (isRangeInsideScriptTag(text, startOffset, endOffset)) return false
+
+  return isLikelyMarkupText(text, startOffset, endOffset)
+}
+
+function hasMessageBoundary(text, startOffset, endOffset, wasQuoted) {
+  if (wasQuoted) return true
+
+  const first = text[startOffset]
+  const last = text[endOffset - 1]
+  const previous = text[startOffset - 1]
+  const next = text[endOffset]
+  if (isIdentifierCharacter(first) && isIdentifierCharacter(previous)) return false
+  if (isIdentifierCharacter(last) && isIdentifierCharacter(next)) return false
+  return true
+}
+
+function isIdentifierCharacter(character) {
+  return typeof character === "string" && /[\p{Letter}\p{Number}_$-]/u.test(character)
+}
+
+function isRangeInsideExistingMessageReference(text, startOffset, endOffset) {
+  return findMessageReferences(text).some((reference) => {
+    const referenceStart = positionToOffset(text, reference.fullRange.start)
+    const referenceEnd = positionToOffset(text, reference.fullRange.end)
+    return referenceStart <= startOffset && endOffset <= referenceEnd
+  })
+}
+
+function isRangeInsideImportStatement(text, startOffset, endOffset) {
+  const lineStart = text.lastIndexOf("\n", startOffset - 1) + 1
+  const lineEndOffset = text.indexOf("\n", endOffset)
+  const lineEnd = lineEndOffset === -1 ? text.length : lineEndOffset
+  const line = text.slice(lineStart, lineEnd)
+  if (/^\s*import\b/.test(line)) return true
+  if (/\bfrom\s*$/.test(text.slice(lineStart, startOffset))) return true
+  return false
+}
+
+function isRangeInsideIgnoredMarkupAttribute(text, startOffset) {
+  const attribute = markupAttributeAtOffset(text, startOffset)
+  return attribute ? ["class", "className", "style"].includes(attribute) : false
+}
+
+function markupAttributeAtOffset(text, offset) {
+  const quote = text[offset]
+  if (quote !== '"' && quote !== "'" && quote !== "`") return undefined
+
+  const before = text.slice(0, offset)
+  const lastOpen = before.lastIndexOf("<")
+  const lastClose = before.lastIndexOf(">")
+  if (lastOpen <= lastClose) return undefined
+
+  const match = before.slice(lastOpen).match(/([A-Za-z_:][\w:.-]*)\s*=\s*$/)
+  return match?.[1]
+}
+
+function isRangeInsideScriptTag(text, startOffset, endOffset) {
+  return (
+    isPositionInsideScriptTag(text, offsetToPosition(text, startOffset)) &&
+    isPositionInsideScriptTag(text, offsetToPosition(text, endOffset))
+  )
+}
+
+function isLikelyMarkupText(text, startOffset, endOffset) {
+  const before = text.slice(0, startOffset)
+  const after = text.slice(endOffset)
+  const lastOpen = before.lastIndexOf("<")
+  const lastClose = before.lastIndexOf(">")
+  if (lastClose <= lastOpen) return false
+
+  const nextOpen = after.indexOf("<")
+  const nextClose = after.indexOf(">")
+  if (nextOpen === -1) return false
+  return nextClose === -1 || nextOpen < nextClose
 }
 
 function interpolatedReplacementTargets(text, message) {
