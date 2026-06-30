@@ -23,6 +23,7 @@ import {
   offsetToPosition,
   pathToUri,
   selectProjectForFile,
+  translationFor,
   upsertFlatJsonMessage,
 } from "./core.js"
 
@@ -34,13 +35,33 @@ test("finds common Inlang message reference forms", () => {
     i18next.t('welcome_user')
     m.missing_in_german()
     m["dotted.key"]()
+    m.example_message({ username: 'John Doe' })
     formatMessage({ id: "format_id" })
   `)
 
   assert.deepEqual(
     references.map((reference) => reference.rawKey),
-    ["hello_world", "welcome_user", "missing_in_german", "dotted.key", "format_id"],
+    [
+      "hello_world",
+      "welcome_user",
+      "missing_in_german",
+      "dotted.key",
+      "example_message",
+      "format_id",
+    ],
   )
+  assert.deepEqual(references[4].args, { username: "John Doe" })
+
+  const multilineReferences = findMessageReferences(`{m.jojo_mountain_day({
+    username: "John Doe",
+    platform: "ios",
+    userGender: "male",
+  })}`)
+  assert.deepEqual(multilineReferences[0].args, {
+    username: "John Doe",
+    platform: "ios",
+    userGender: "male",
+  })
 })
 
 test("flattens simple and nested message JSON", () => {
@@ -55,6 +76,28 @@ test("flattens simple and nested message JSON", () => {
   assert.equal(messages.get("hello"), "Hello")
   assert.equal(messages.get("nested.key"), "Nested")
   assert.equal(messages.get("pattern"), "Pattern")
+})
+
+test("stringifies Inlang message-format match messages", () => {
+  const messages = flattenMessages({
+    jojo_mountain_day: [
+      {
+        declarations: ["input username", "input platform", "input userGender"],
+        selectors: ["platform", "userGender"],
+        match: {
+          "platform=android, userGender=male":
+            "{username} has to download the app on his phone from the Google Play Store.",
+          "platform=ios, userGender=male":
+            "{username} has to download the app on his iPhone from the App Store.",
+        },
+      },
+    ],
+  })
+
+  assert.equal(
+    messages.get("jojo_mountain_day"),
+    "{username} has to download the app on his phone from the Google Play Store.",
+  )
 })
 
 test("does not throw while flattening deeply nested message JSON", () => {
@@ -253,6 +296,79 @@ test("places Svelte Paraglide hints after the full call expression", async () =>
 
   assert.equal(hints[0].label.trim(), "こんにちは")
   assert.deepEqual(hints[0].position, { line: 0, character: 20 })
+})
+
+test("uses Paraglide call arguments in inlay hints", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-arguments-"))
+  const project = path.join(root, "project.inlang")
+  await mkdir(path.join(root, "messages"), { recursive: true })
+  await mkdir(project)
+  await writeFile(
+    path.join(project, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.messageFormat": { pathPattern: "./messages/{locale}.json" },
+    }),
+  )
+  await writeFile(
+    path.join(root, "messages", "en.json"),
+    JSON.stringify({
+      example_message: "Hello world {username}",
+      jojo_mountain_day: [
+        {
+          declarations: ["input username", "input platform", "input userGender"],
+          selectors: ["platform", "userGender"],
+          match: {
+            "platform=android, userGender=male":
+              "{username} has to download the app on his phone from the Google Play Store.",
+            "platform=android, userGender=female":
+              "{username} has to download the app on her phone from the Google Play Store.",
+            "platform=ios, userGender=female":
+              "{username} has to download the app on her iPhone from the App Store.",
+            "platform=ios, userGender=male":
+              "{username} has to download the app on his iPhone from the App Store.",
+            "platform=*, userGender=*": "The person has to download the app.",
+          },
+        },
+      ],
+    }),
+  )
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { m } from '$lib/paraglide/messages';
+
+const message = m.example_message({ username: 'John Doe' })
+</script>
+
+{m.jojo_mountain_day({
+  username: "John Doe",
+  platform: "ios",
+  userGender: "male",
+})}
+`
+  const jojoReference = findMessageReferences(text)[1]
+  assert.deepEqual(jojoReference.args, {
+    username: "John Doe",
+    platform: "ios",
+    userGender: "male",
+  })
+  assert.equal(
+    translationFor(
+      workspace.projects[0],
+      jojoReference.rawKey,
+      workspace.projects[0].previewLocale,
+      jojoReference.args,
+    ).message,
+    "John Doe has to download the app on his iPhone from the App Store.",
+  )
+  const hints = createInlayHints(text, workspace.projects[0])
+
+  assert.deepEqual(
+    hints.map((hint) => hint.label.trim()),
+    ["Hello world John Doe", "John Doe has to download the app on his iPhone from the App Store."],
+  )
 })
 
 test("resolves definitions from Svelte message calls to every locale JSON key", async () => {
@@ -631,6 +747,481 @@ const a = "Welcome to the SvelteKit Paraglide JS example."
     start: { line: 3, character: 10 },
     end: { line: 3, character: 58 },
   })
+})
+
+test("replace action maps Svelte expressions to message placeholders", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-placeholder-expression-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world {username}" }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { m } from '$lib/paraglide/messages'
+</script>
+
+<p>Hello world {a}</p>
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/routes/+page.svelte",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(
+    actions[0].edit.changes["file:///src/routes/+page.svelte"][0].newText,
+    "{m.example_message({ username: a })}",
+  )
+  assert.deepEqual(actions[0].edit.changes["file:///src/routes/+page.svelte"][0].range, {
+    start: { line: 4, character: 3 },
+    end: { line: 4, character: 18 },
+  })
+})
+
+test("replace action maps literal text to message placeholders", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-placeholder-literal-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world {username}" }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { m } from '$lib/paraglide/messages'
+</script>
+
+<p>Hello world John Doe</p>
+`
+  const diagnostics = createDiagnostics(text, workspace.projects[0])
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => ({
+      code: diagnostic.code,
+      message: diagnostic.message,
+      range: diagnostic.range,
+    })),
+    [
+      {
+        code: "existing-message-value",
+        message: "Text matches existing Inlang message 'example_message'.",
+        range: {
+          start: { line: 4, character: 3 },
+          end: { line: 4, character: 23 },
+        },
+      },
+    ],
+  )
+
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/routes/+page.svelte",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(
+    actions[0].edit.changes["file:///src/routes/+page.svelte"][0].newText,
+    "{m.example_message({ username: 'John Doe' })}",
+  )
+  assert.deepEqual(actions[0].edit.changes["file:///src/routes/+page.svelte"][0].range, {
+    start: { line: 4, character: 3 },
+    end: { line: 4, character: 23 },
+  })
+})
+
+test("replace action detects Paraglide m in mixed named imports", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-mixed-import-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { localizeHref, m } from '$lib/paraglide/messages'
+</script>
+
+<p>Hello world</p>
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/routes/+page.svelte",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(
+    actions[0].edit.changes["file:///src/routes/+page.svelte"][0].newText,
+    "{m.example_message()}",
+  )
+})
+
+test("replace action imports m into existing Paraglide named imports", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-add-m-import-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const documentUri = "file:///src/routes/+page.svelte"
+  const text = `<script>
+import { localizeHref } from '$lib/paraglide/messages'
+</script>
+
+<p>Hello world</p>
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri,
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.deepEqual(actions[0].edit.changes[documentUri], [
+    {
+      range: {
+        start: { line: 1, character: 22 },
+        end: { line: 1, character: 22 },
+      },
+      newText: ", m",
+    },
+    {
+      range: {
+        start: { line: 4, character: 3 },
+        end: { line: 4, character: 14 },
+      },
+      newText: "{m.example_message()}",
+    },
+  ])
+})
+
+test("replace action uses aliased Paraglide m imports", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-aliased-import-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { m as msg } from '$lib/paraglide/messages'
+</script>
+
+<p>Hello world</p>
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/routes/+page.svelte",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(
+    actions[0].edit.changes["file:///src/routes/+page.svelte"][0].newText,
+    "{msg.example_message()}",
+  )
+})
+
+test("replace action wraps Svelte markup replacements when the uri has metadata", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-svelte-uri-metadata-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const documentUri = "file:///src/routes/+page.svelte?zed"
+  const text = `<script>
+import { m } from '$lib/paraglide/messages'
+</script>
+
+<p>Hello world</p>
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri,
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(actions[0].edit.changes[documentUri][0].newText, "{m.example_message()}")
+})
+
+test("replace action wraps quoted Svelte markup attributes as expressions", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-svelte-attribute-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `<script>
+import { m } from '$lib/paraglide/messages'
+</script>
+
+<img alt="Hello world">
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/routes/+page.svelte",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(
+    actions[0].edit.changes["file:///src/routes/+page.svelte"][0].newText,
+    "{m.example_message()}",
+  )
+  assert.deepEqual(actions[0].edit.changes["file:///src/routes/+page.svelte"][0].range, {
+    start: { line: 4, character: 9 },
+    end: { line: 4, character: 22 },
+  })
+})
+
+test("replace action wraps React JSX text replacements as expressions", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-react-text-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `import { m } from '@/paraglide/messages'
+
+export function Component() {
+  return <p>Hello world</p>
+}
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/components/Component.tsx",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(
+    actions[0].edit.changes["file:///src/components/Component.tsx"][0].newText,
+    "{m.example_message()}",
+  )
+})
+
+test("replace action imports m for React when Paraglide named imports already exist", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-react-add-m-import-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const documentUri = "file:///src/components/Component.tsx"
+  const text = `import { localizeHref } from '@/paraglide/messages'
+
+export function Component() {
+  return <p>Hello world</p>
+}
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri,
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.deepEqual(actions[0].edit.changes[documentUri], [
+    {
+      range: {
+        start: { line: 0, character: 22 },
+        end: { line: 0, character: 22 },
+      },
+      newText: ", m",
+    },
+    {
+      range: {
+        start: { line: 3, character: 12 },
+        end: { line: 3, character: 23 },
+      },
+      newText: "{m.example_message()}",
+    },
+  ])
+})
+
+test("replace action wraps React JSX quoted attributes as expressions", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-react-attribute-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `import { m } from '@/paraglide/messages'
+
+export function Component() {
+  return <img alt="Hello world" />
+}
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/components/Component.tsx",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(
+    actions[0].edit.changes["file:///src/components/Component.tsx"][0].newText,
+    "{m.example_message()}",
+  )
+  assert.deepEqual(actions[0].edit.changes["file:///src/components/Component.tsx"][0].range, {
+    start: { line: 3, character: 18 },
+    end: { line: 3, character: 31 },
+  })
+})
+
+test("replace action does not wrap TypeScript strings in TSX files", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "inlang-replace-react-script-string-"))
+  const projectPath = path.join(root, "project.inlang")
+  const messagesPath = path.join(root, "messages", "en.json")
+  await mkdir(path.dirname(messagesPath), { recursive: true })
+  await mkdir(projectPath)
+  await writeFile(
+    path.join(projectPath, "settings.json"),
+    JSON.stringify({
+      baseLocale: "en",
+      locales: ["en"],
+      "plugin.inlang.json": { pathPattern: "./messages/{languageTag}.json" },
+    }),
+  )
+  await writeFile(messagesPath, JSON.stringify({ example_message: "Hello world" }))
+
+  const workspace = await loadWorkspace(root)
+  const text = `import { m } from '@/paraglide/messages'
+
+const title = "Hello world"
+`
+  const start = text.indexOf("Hello world")
+  const position = offsetToPosition(text, start + 2)
+  const actions = createReplaceWithExistingMessageCodeActions({
+    documentUri: "file:///src/components/Component.tsx",
+    text,
+    range: { start: position, end: position },
+    project: workspace.projects[0],
+  })
+
+  assert.equal(
+    actions[0].edit.changes["file:///src/components/Component.tsx"][0].newText,
+    "m.example_message()",
+  )
 })
 
 test("extract action uses expression Paraglide references inside quoted script strings", async () => {
