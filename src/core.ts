@@ -778,22 +778,6 @@ function createExistingMessageValueDiagnostics(text, project) {
     }
   }
 
-  for (const [messageId, message] of baseMessages.entries()) {
-    if (typeof message !== "string" || !message.includes("{")) continue
-
-    for (const target of interpolatedReplacementTargets(text, message)) {
-      if (!isSupportedReplacementTarget(text, target)) continue
-
-      diagnostics.push({
-        range: target.range,
-        severity: 3,
-        source: "Inlang",
-        code: "existing-message-value",
-        message: `Text matches existing Inlang message '${messageId}'.`,
-      })
-    }
-  }
-
   return diagnostics
 }
 
@@ -1038,61 +1022,7 @@ export function createReplaceWithExistingMessageCodeActions({ documentUri, text,
     )
   }
 
-  actions.push(
-    ...createReplaceWithInterpolatedMessageCodeActions({
-      documentUri,
-      text,
-      range,
-      baseMessages,
-    }),
-  )
-
   return uniqueCodeActions(actions)
-}
-
-function createReplaceWithInterpolatedMessageCodeActions({
-  documentUri,
-  text,
-  range,
-  baseMessages,
-}) {
-  const actions = []
-  const offset = positionToOffset(text, range.start)
-
-  for (const [messageId, message] of baseMessages.entries()) {
-    if (typeof message !== "string" || !message.includes("{")) continue
-
-    for (const target of interpolatedReplacementTargets(text, message)) {
-      if (!isSupportedReplacementTarget(text, target)) continue
-
-      if (rangesEqual(range, target.range) || rangeContains(target.range, range.start)) {
-        actions.push(
-          replaceWithExistingMessageAction({
-            documentUri,
-            text,
-            target,
-            messageId,
-          }),
-        )
-        continue
-      }
-
-      const startOffset = positionToOffset(text, target.range.start)
-      const endOffset = positionToOffset(text, target.range.end)
-      if (startOffset <= offset && offset <= endOffset) {
-        actions.push(
-          replaceWithExistingMessageAction({
-            documentUri,
-            text,
-            target,
-            messageId,
-          }),
-        )
-      }
-    }
-  }
-
-  return actions
 }
 
 function replaceWithExistingMessageAction({ documentUri, text, target, messageId }) {
@@ -1130,10 +1060,6 @@ function uniqueCodeActions(actions) {
     seen.add(id)
     return true
   })
-}
-
-function rangesEqual(a, b) {
-  return comparePositions(a.start, b.start) === 0 && comparePositions(a.end, b.end) === 0
 }
 
 function replacementTargetForRange(text, range, messages: string[]) {
@@ -1271,93 +1197,6 @@ function isLikelyMarkupText(text, startOffset, endOffset) {
   const nextClose = after.indexOf(">")
   if (nextOpen === -1) return false
   return nextClose === -1 || nextOpen < nextClose
-}
-
-function interpolatedReplacementTargets(text, message) {
-  const template = messageTemplateParts(message)
-  if (template.placeholders.length === 0) return []
-
-  const regex = messageTemplateSourceRegex(template.parts)
-  const targets = []
-
-  for (const match of text.matchAll(regex)) {
-    const args = {}
-    let captureIndex = 1
-
-    for (const placeholder of template.placeholders) {
-      const expression = match[captureIndex++]
-      const literal = match[captureIndex++]
-      if (expression !== undefined) {
-        args[placeholder] = { kind: "expression", value: expression.trim() }
-      } else if (literal !== undefined) {
-        args[placeholder] = { kind: "literal", value: literal.trim() }
-      }
-    }
-
-    if (Object.keys(args).length !== template.placeholders.length) continue
-
-    targets.push({
-      text: match[0],
-      range: rangeForOffsets(text, match.index, match.index + match[0].length),
-      wasQuoted: false,
-      argsText: formatMessageReferenceArgs(args),
-    })
-  }
-
-  return targets
-}
-
-function messageTemplateParts(message) {
-  const parts = []
-  const placeholders = []
-  let offset = 0
-
-  for (const match of message.matchAll(/\{([A-Za-z_$][\w$]*)\}/g)) {
-    if (match.index > offset) {
-      parts.push({ kind: "text", value: message.slice(offset, match.index) })
-    }
-    parts.push({ kind: "placeholder", name: match[1] })
-    placeholders.push(match[1])
-    offset = match.index + match[0].length
-  }
-
-  if (offset < message.length) {
-    parts.push({ kind: "text", value: message.slice(offset) })
-  }
-
-  return { parts, placeholders }
-}
-
-function messageTemplateSourceRegex(parts) {
-  const source = parts
-    .map((part, index) => {
-      if (part.kind === "text") return escapeRegExp(part.value)
-
-      const hasNextText = parts.slice(index + 1).some((candidate) => candidate.kind === "text")
-      const literalPattern = hasNextText ? "([\\s\\S]+?)" : "([^<\\n{}]+)"
-      return `(?:\\{\\s*([^{}]+?)\\s*\\}|${literalPattern})`
-    })
-    .join("")
-
-  return new RegExp(source, "g")
-}
-
-function formatMessageReferenceArgs(args) {
-  return `{ ${Object.entries(args)
-    .map(([name, value]) => `${name}: ${formatMessageReferenceArgValue(value)}`)
-    .join(", ")} }`
-}
-
-function formatMessageReferenceArgValue(value) {
-  return value.kind === "expression" ? value.value : quoteJsString(value.value)
-}
-
-function quoteJsString(value) {
-  return `'${String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n")}'`
-}
-
-function escapeRegExp(value) {
-  return String(value).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")
 }
 
 function readFileSyncSafe(filePath) {
